@@ -114,7 +114,65 @@ It will look something like this:
         }
       }
     }
+  },
+  "model": "kiro/claude-opus-4.8"
+}
+```
+
+## 🤖 Pi AI Agent Integration (pi.dev)
+
+The proxy also integrates seamlessly with the **Pi Coding Agent**. 
+
+### How It Works
+The Pi Agent is configured to route standard OpenAI-compatible requests to our local proxy (`http://127.0.0.1:8000/v1`). The proxy intercepts the request, grabs your active Kiro credentials, translates the tool definitions/messages into the proprietary AWS Binary Event Stream protocol, and streams the response back to the Pi Agent as standard Server-Sent Events (SSE).
+
+### Configuration
+To configure the proxy in Pi, edit or create the Pi models configuration file:
+* **File Path:** `%USERPROFILE%\.pi\agent\models.json` (Windows) or `~/.pi/agent/models.json` (Linux/macOS)
+
+Add a custom provider pointing to the local proxy:
+```json
+{
+  "providers": {
+    "kiro-proxy": {
+      "baseUrl": "http://127.0.0.1:8000/v1",
+      "api": "openai-completions",
+      "apiKey": "dummy-key-not-used-by-proxy",
+      "models": [
+        {
+          "id": "claude-opus-4.8",
+          "name": "Claude Opus 4.8 (via Kiro)",
+          "contextWindow": 1000000,
+          "maxTokens": 65536
+        },
+        {
+          "id": "claude-sonnet-4.6",
+          "name": "Claude Sonnet 4.6 (via Kiro)",
+          "contextWindow": 200000,
+          "maxTokens": 65536
+        }
+      ]
+    }
   }
+}
+```
+
+### Usage
+1. Start the proxy (double-click the Desktop shortcut or run `start.bat`).
+2. Run `/reload` in your active `pi` terminal session to reload your provider list.
+3. Switch the active model in Pi using:
+   ```bash
+   /model kiro-proxy/claude-opus-4.8
+   ```
+
+To make the Kiro proxy your default provider and model when launching the Pi Agent, update your `settings.json` file:
+* **File Path:** `%USERPROFILE%\.pi\agent\settings.json` (Windows) or `~/.pi/agent/settings.json` (Linux/macOS)
+
+Set the following configuration keys:
+```json
+{
+  "defaultProvider": "kiro-proxy",
+  "defaultModel": "claude-opus-4.8"
 }
 ```
 
