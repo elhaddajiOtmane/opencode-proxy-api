@@ -29,6 +29,8 @@ echo [*] Starting dashboard server...
 echo     Open http://localhost:3128 in your browser.
 echo     Press Ctrl+C to stop.
 echo.
+:: Wait 2 seconds and open the browser in the background
+start /b "" cmd /c "timeout /t 2 >nul && start http://localhost:3128/"
 python auth_capture_v2.py
 
 pause
