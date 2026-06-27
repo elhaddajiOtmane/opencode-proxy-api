@@ -326,6 +326,10 @@ async def startup_event():
             if existing_pid and not _process_exists(existing_pid):
                 print(f"[INIT] Stale PID file (PID {existing_pid} is dead) — clearing")
                 _clear_proxy_pid()
+            
+            # Auto-start the proxy if it's not already running
+            print("[INIT] Auto-starting proxy process...")
+            start_proxy()
 
     # Refresh tokens that are close to expiry on startup
     refresh_expiring_tokens()
