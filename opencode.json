@@ -9,15 +9,15 @@
         "apiKey": "dummy-key-not-used-by-proxy"
       },
       "models": {
-        "claude-opus-4.5": {
-          "name": "Claude Opus 4.5 (via Kiro)",
+        "claude-opus-4.8": {
+          "name": "Claude Opus 4.8 (via Kiro)",
           "limit": {
             "context": 200000,
             "output": 65536
           }
         },
-        "claude-sonnet-4.5": {
-          "name": "Claude Sonnet 4.5 (via Kiro)",
+        "claude-sonnet-4.6": {
+          "name": "Claude Sonnet 4.6 (via Kiro)",
           "limit": {
             "context": 200000,
             "output": 65536
