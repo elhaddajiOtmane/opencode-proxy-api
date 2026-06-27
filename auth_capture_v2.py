@@ -1,6 +1,7 @@
 import hashlib
 import secrets
 import base64
+import sys
 import requests
 import uvicorn
 from fastapi import FastAPI, Request, Form, BackgroundTasks
@@ -12,6 +13,8 @@ import os
 import uuid
 import subprocess
 import psutil
+import socket
+import asyncio
 
 app = FastAPI()
 
@@ -21,6 +24,12 @@ REFRESH_ENDPOINT = "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
 USAGE_ENDPOINT = "https://q.us-east-1.amazonaws.com/getUsageLimits"
 PROFILES_FILE = "profiles.json"
 PROXY_SCRIPT = "proxy.py"
+PROXY_PID_FILE = "proxy.pid"
+PROXY_PORT = 8000
+
+# Model configuration (override via environment variables)
+OPENAI_MODEL_NAME = os.environ.get("OPENAI_MODEL_NAME", "claude-sonnet-4.5")
+KIRO_MODEL_ID = os.environ.get("KIRO_MODEL_ID", OPENAI_MODEL_NAME)
 
 # State management for current OAuth flow
 oauth_flow = {
@@ -32,34 +41,144 @@ oauth_flow = {
 # Proxy Process Management
 proxy_process = None
 
+def _load_proxy_pid():
+    """Return PID from pidfile if it exists and looks valid."""
+    if not os.path.exists(PROXY_PID_FILE):
+        return None
+    try:
+        with open(PROXY_PID_FILE, "r") as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+def _save_proxy_pid(pid: int):
+    try:
+        with open(PROXY_PID_FILE, "w") as f:
+            f.write(str(pid))
+    except Exception as e:
+        print(f"Failed to write proxy PID file: {e}")
+
+def _clear_proxy_pid():
+    try:
+        if os.path.exists(PROXY_PID_FILE):
+            os.remove(PROXY_PID_FILE)
+    except Exception:
+        pass
+
+def _process_exists(pid: int) -> bool:
+    """Check whether a process with the given PID exists and is runnable."""
+    if pid is None or pid <= 0:
+        return False
+    try:
+        proc = psutil.Process(pid)
+        return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+def _port_in_use(port: int) -> bool:
+    """Check if a local TCP port is currently listening."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            s.bind(("127.0.0.1", port))
+            return False
+    except (socket.error, OSError):
+        return True
+
+def _find_proxy_pid_by_port(port: int = PROXY_PORT):
+    """Try to find the process listening on the proxy port."""
+    try:
+        for conn in psutil.net_connections(kind="inet"):
+            if conn.laddr and conn.laddr.port == port and conn.status == psutil.CONN_LISTEN:
+                return conn.pid
+    except Exception as e:
+        print(f"Failed to scan network connections: {e}")
+    return None
+
+def _find_proxy_pid_by_name():
+    """Scan all running processes for a python proxy.py process."""
+    try:
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                cmdline = proc.info.get('cmdline') or []
+                if any('proxy.py' in c for c in cmdline):
+                    return proc.info['pid']
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception as e:
+        print(f"Failed to scan processes by name: {e}")
+    return None
+
 def start_proxy():
     global proxy_process
-    if proxy_process is None or proxy_process.poll() is not None:
-        try:
-            proxy_process = subprocess.Popen(["python", PROXY_SCRIPT])
-            return True
-        except Exception as e:
-            print(f"Failed to start proxy: {e}")
-            return False
-    return True
+    if is_proxy_running():
+        return True
+    try:
+        env = os.environ.copy()
+        proxy_process = subprocess.Popen([sys.executable, PROXY_SCRIPT], env=env)
+        _save_proxy_pid(proxy_process.pid)
+        print(f"[PROXY] Started proxy on PID {proxy_process.pid}")
+        return True
+    except Exception as e:
+        print(f"Failed to start proxy: {e}")
+        return False
 
 def stop_proxy():
     global proxy_process
+    pid = _load_proxy_pid()
+    _clear_proxy_pid()
+
+    # Stop tracked subprocess first
     if proxy_process is not None and proxy_process.poll() is None:
         try:
-            # On Windows, we might need to terminate child processes too, but proxy.py is simple
             proxy_process.terminate()
             proxy_process.wait(timeout=3)
+        except Exception:
+            try:
+                proxy_process.kill()
+            except Exception:
+                pass
+
+    # Also kill by PID file in case the subprocess variable is stale
+    if pid and pid != os.getpid():
+        try:
+            proc = psutil.Process(pid)
+            proc.terminate()
+            proc.wait(timeout=3)
         except psutil.NoSuchProcess:
             pass
         except Exception:
-            proxy_process.kill()
-        proxy_process = None
+            try:
+                psutil.Process(pid).kill()
+            except Exception:
+                pass
+
+    proxy_process = None
     return True
 
 def is_proxy_running():
     global proxy_process
-    return proxy_process is not None and proxy_process.poll() is None
+    # First check tracked subprocess
+    if proxy_process is not None and proxy_process.poll() is None:
+        return True
+
+    # Check PID file
+    pid = _load_proxy_pid()
+    if pid and _process_exists(pid):
+        return True
+
+    # Fallback: check if the proxy port is listening
+    if _port_in_use(PROXY_PORT):
+        return True
+
+    # Last resort: scan all processes for proxy.py (catches restarts where pidfile was lost)
+    pid_by_name = _find_proxy_pid_by_name()
+    if pid_by_name and _process_exists(pid_by_name):
+        _save_proxy_pid(pid_by_name)  # Re-attach so future checks are fast
+        print(f"[PROXY] Re-attached to proxy process PID {pid_by_name} via process scan")
+        return True
+
+    return False
 
 # --- Profile Helpers ---
 
@@ -150,6 +269,29 @@ def update_profile_usage(profile: dict, usage: dict):
         
     profile["usage_reset_at"] = usage.get("nextDateReset")
 
+def refresh_expiring_tokens(threshold_seconds: int = 600):
+    """Refresh any profile token that expires within threshold_seconds."""
+    db = load_profiles()
+    now = time.time()
+    changed = False
+    for i, p in enumerate(db.get("profiles", [])):
+        expires_at = p.get("expires_at", 0)
+        if expires_at and expires_at < now + threshold_seconds:
+            print(f"[AUTO-REFRESH] Refreshing token for {p.get('email', 'Unknown')} (expires in {(expires_at - now) / 60:.1f} min)")
+            db["profiles"][i] = refresh_profile_token(p)
+            changed = True
+    if changed:
+        save_profiles(db)
+
+async def periodic_token_refresh(interval_minutes: int = 10):
+    """Background task that periodically refreshes expiring tokens."""
+    while True:
+        await asyncio.sleep(interval_minutes * 60)
+        try:
+            refresh_expiring_tokens()
+        except Exception as e:
+            print(f"[AUTO-REFRESH] Background refresh failed: {e}")
+
 # --- OAuth PKCE Logic ---
 
 def generate_pkce():
@@ -157,6 +299,39 @@ def generate_pkce():
     sha256 = hashlib.sha256(verifier.encode('utf-8')).digest()
     challenge = base64.urlsafe_b64encode(sha256).decode('utf-8').rstrip('=')
     return verifier, challenge
+
+# --- Startup ---
+
+@app.on_event("startup")
+async def startup_event():
+    # If a proxy is already running (e.g. from a previous dashboard session),
+    # attach to it so the UI shows the correct status after refresh/restart.
+    if _port_in_use(PROXY_PORT):
+        pid = _find_proxy_pid_by_port(PROXY_PORT)
+        if pid:
+            _save_proxy_pid(pid)
+            print(f"[INIT] Attached to existing proxy process on PID {pid} (port scan)")
+        else:
+            print("[INIT] Proxy port 8000 is in use but PID could not be identified via port scan")
+    else:
+        # Port is not yet bound — but the process may still be starting up.
+        # Try to find proxy.py by process name before clearing the pidfile.
+        pid_by_name = _find_proxy_pid_by_name()
+        if pid_by_name and _process_exists(pid_by_name):
+            _save_proxy_pid(pid_by_name)
+            print(f"[INIT] Attached to existing proxy process PID {pid_by_name} (process name scan)")
+        else:
+            # Only clear the pidfile when we're genuinely sure nothing is running
+            existing_pid = _load_proxy_pid()
+            if existing_pid and not _process_exists(existing_pid):
+                print(f"[INIT] Stale PID file (PID {existing_pid} is dead) — clearing")
+                _clear_proxy_pid()
+
+    # Refresh tokens that are close to expiry on startup
+    refresh_expiring_tokens()
+
+    # Start background periodic token refresh
+    asyncio.create_task(periodic_token_refresh())
 
 # --- Routes ---
 
@@ -238,50 +413,44 @@ async def dashboard(request: Request):
     if not profile_cards:
         profile_cards = "<p style='color:#718096; text-align:center; padding:40px;'>No profiles found. Add one to get started.</p>"
 
-    opencode_config_html = """
+    opencode_config_json = json.dumps({
+        "provider": {
+            "kiro": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Kiro Backend Proxy",
+                "options": {
+                    "baseURL": f"http://127.0.0.1:{PROXY_PORT}/v1",
+                    "apiKey": "dummy-key-not-used-by-proxy"
+                },
+                "models": {
+                    OPENAI_MODEL_NAME: {
+                        "name": f"{OPENAI_MODEL_NAME.replace('-', ' ').title()} (via Kiro)",
+                        "limit": {"context": 200000, "output": 65536}
+                    }
+                }
+            }
+        },
+        "model": f"kiro/{OPENAI_MODEL_NAME}"
+    }, indent=2)
+
+    opencode_config_html = f"""
     <div style="margin-top:24px; padding:20px; background:white; border-radius:12px; border:1px solid #e2e8f0; box-shadow:0 2px 4px rgba(0,0,0,0.05);">
         <h3 style="margin-top:0; color:#2d3748;">Opencode Configuration</h3>
         <p style="color:#718096; font-size:14px; margin-bottom:12px;">Add this to your <strong>opencode.json</strong> to connect to the proxy:</p>
+        <p style="color:#718096; font-size:13px; margin-bottom:12px;">Backend model: <code>{KIRO_MODEL_ID}</code> &middot; Exposed as: <code>{OPENAI_MODEL_NAME}</code></p>
         <div style="position:relative;">
-            <pre id="opencodeConf" style="background:#2d3748; color:#f7fafc; padding:16px; border-radius:8px; overflow-x:auto; font-size:13px; line-height:1.4; margin:0;">{
-  "provider": {
-    "kiro": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Kiro Backend Proxy",
-      "options": {
-        "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "dummy-key-not-used-by-proxy"
-      },
-      "models": {
-        "claude-sonnet-4.0": {
-          "name": "Claude Sonnet 4.0 (via Kiro)",
-          "limit": {
-            "context": 200000,
-            "output": 65536
-          }
-        },
-        "claude-sonnet-4.5": {
-          "name": "Claude Sonnet 4.5 (via Kiro)",
-          "limit": {
-            "context": 200000,
-            "output": 65536
-          }
-        }
-      }
-    }
-  }
-}</pre>
+            <pre id="opencodeConf" style="background:#2d3748; color:#f7fafc; padding:16px; border-radius:8px; overflow-x:auto; font-size:13px; line-height:1.4; margin:0;">{opencode_config_json}</pre>
             <button onclick="copyConfig()" style="position:absolute; top:8px; right:8px; background:#4a5568; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:12px; transition: background 0.2s;">Copy</button>
         </div>
         <p id="confMsg" style="color:#48bb78; font-size:12px; margin-top:8px; text-align:right; display:none; font-weight:600;">Copied to clipboard!</p>
     </div>
     <script>
-        function copyConfig() {
+        function copyConfig() {{
             var text = document.getElementById("opencodeConf").innerText;
             navigator.clipboard.writeText(text);
             document.getElementById("confMsg").style.display = "block";
-            setTimeout(() => { document.getElementById("confMsg").style.display = "none"; }, 3000);
-        }
+            setTimeout(() => {{ document.getElementById("confMsg").style.display = "none"; }}, 3000);
+        }}
     </script>
     """
 

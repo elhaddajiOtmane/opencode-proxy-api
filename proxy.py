@@ -17,6 +17,15 @@ DASHBOARD_URL = "http://localhost:3128/api/active-profile"
 DEFAULT_OPENAI_MODEL = os.environ.get("OPENAI_MODEL_NAME", "claude-sonnet-4.5")
 DEFAULT_KIRO_MODEL = os.environ.get("KIRO_MODEL_ID", DEFAULT_OPENAI_MODEL)
 
+# Expose additional models to opencode if configured as a comma-separated list
+ADDITIONAL_OPENAI_MODELS = [
+    m.strip()
+    for m in os.environ.get("ADDITIONAL_OPENAI_MODELS", "").split(",")
+    if m.strip()
+]
+
+OPENAI_MODELS = [DEFAULT_OPENAI_MODEL] + [m for m in ADDITIONAL_OPENAI_MODELS if m != DEFAULT_OPENAI_MODEL]
+
 def get_machine_id():
     """Get or generate a persistent machine ID"""
     machine_id_file = "machine_id.txt"
