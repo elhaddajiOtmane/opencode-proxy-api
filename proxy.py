@@ -298,14 +298,14 @@ async def chat_completions(request: Request):
 
     messages = data.get("messages", [])
     model = data.get("model", DEFAULT_OPENAI_MODEL)
-    # Map requested model ID → Kiro backend model ID
+    # Map requested model ID → Kiro backend model ID (Kiro uses dot notation: 4.5 not 4-5)
     MODEL_MAP = {
-        "claude-opus-4-5":    "claude-opus-4-5",
-        "claude-opus-4.5":    "claude-opus-4-5",
-        "claude-sonnet-4-5":  "claude-sonnet-4-5",
-        "claude-sonnet-4.5":  "claude-sonnet-4-5",
-        "claude-sonnet-4.0":  "claude-sonnet-4-5",
-        "claude-sonnet-4":    "claude-sonnet-4-5",
+        "claude-opus-4-5":    "claude-opus-4.5",
+        "claude-opus-4.5":    "claude-opus-4.5",
+        "claude-sonnet-4-5":  "claude-sonnet-4.5",
+        "claude-sonnet-4.5":  "claude-sonnet-4.5",
+        "claude-sonnet-4.0":  "claude-sonnet-4.5",
+        "claude-sonnet-4":    "claude-sonnet-4.5",
     }
     backend_model = MODEL_MAP.get(model, model)  # Forward requested model, fallback to as-is
     stream = data.get("stream", False)
