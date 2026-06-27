@@ -176,6 +176,40 @@ Set the following configuration keys:
 }
 ```
 
+## 💻 Claude Code CLI Integration
+
+The proxy fully supports Anthropic's native `/v1/messages` protocol. This allows you to run Anthropic-native CLI tools (like **Claude Code**) directly through your local Kiro proxy.
+
+### How to Use
+
+To route Claude Code requests through the proxy:
+
+1. Start the proxy server (ensure it is running on port `8000`).
+2. Set the `ANTHROPIC_BASE_URL` environment variable to point to your local proxy, and set a dummy token for `ANTHROPIC_API_KEY` in your terminal session.
+
+#### Windows (PowerShell):
+```powershell
+$env:ANTHROPIC_BASE_URL="http://localhost:8000"
+$env:ANTHROPIC_API_KEY="dummy-key-not-used-by-proxy"
+claude
+```
+
+#### Windows (Command Prompt):
+```cmd
+set ANTHROPIC_BASE_URL=http://localhost:8000
+set ANTHROPIC_API_KEY=dummy-key-not-used-by-proxy
+claude
+```
+
+#### macOS / Linux:
+```bash
+export ANTHROPIC_BASE_URL="http://localhost:8000"
+export ANTHROPIC_API_KEY="dummy-key-not-used-by-proxy"
+claude
+```
+
+Once running, the Claude CLI will connect directly to the proxy, which will automatically translate the Anthropic format to Kiro backend API requests and stream the responses back correctly.
+
 ## ⚙️ Configuration & Environment Variables
 
 You can customize the proxy's model mappings and exposure via environment variables when launching either `auth_capture_v2.py` or `proxy.py`:
